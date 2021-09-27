@@ -1927,6 +1927,22 @@ public class NfcService implements DeviceHostListener {
         mHandler.sendMessage(msg);
     }
 
+    /**
+     * Send require device unlock for NFC intent to system UI.
+     */
+    public void sendRequireUnlockIntent() {
+        if (!mIsRequestUnlockShowed && mKeyguard.isKeyguardLocked()) {
+            if (DBG) Log.d(TAG, "Request unlock");
+            mIsRequestUnlockShowed = true;
+            mRequireUnlockWakeLock.acquire();
+            Intent requireUnlockIntent =
+                    new Intent(NfcAdapter.ACTION_REQUIRE_UNLOCK_FOR_NFC);
+            requireUnlockIntent.setPackage(SYSTEM_UI);
+            mContext.sendBroadcast(requireUnlockIntent);
+            mRequireUnlockWakeLock.release();
+        }
+    }
+
     final class NfcServiceHandler extends Handler {
         @Override
         public void handleMessage(Message msg) {
@@ -2131,7 +2147,10 @@ public class NfcService implements DeviceHostListener {
                     break;
                 case MSG_RF_FIELD_ACTIVATED:
                     Intent fieldOnIntent = new Intent(ACTION_RF_FIELD_ON_DETECTED);
-                    sendNfcEeAccessProtectedBroadcast(fieldOnIntent);
+                    sendNfcPermissionProtectedBroadcast(fieldOnIntent);
+                    if (mIsSecureNfcEnabled) {
+                        sendRequireUnlockIntent();
+                    }
                     break;
                 case MSG_RF_FIELD_DEACTIVATED:
                     Intent fieldOffIntent = new Intent(ACTION_RF_FIELD_OFF_DETECTED);
