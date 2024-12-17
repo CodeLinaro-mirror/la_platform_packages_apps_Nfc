@@ -204,7 +204,6 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
     static final String NATIVE_LOG_FILE_PATH = "/data/misc/nfc/logs";
     static final int NATIVE_CRASH_FILE_SIZE = 1024 * 1024;
     private static final String WAIT_FOR_OEM_ALLOW_BOOT_TIMER_TAG = "NfcWaitForSimTag";
-    static final String DEFAULT_T4T_NFCEE_AID = "D2760000850101";
     static final byte[] T4T_NFCEE_CC_FILE_ID = {(byte) (0xE1), (byte) (0x03)};
     @VisibleForTesting
     public static final int WAIT_FOR_OEM_ALLOW_BOOT_TIMEOUT_MS = 5_000;
@@ -1242,13 +1241,13 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
                 new BroadcastReceiver() {
                     @Override
                     public void onReceive(Context context, Intent intent) {
+                        mIsNfcUserChangeRestricted = isNfcUserChangeRestricted();
                         if (mIsNfcUserRestricted == isNfcUserRestricted()) {
                             return;
                         }
                         Log.i(TAG, "Disallow NFC user restriction changed from "
                             + mIsNfcUserRestricted + " to " + !mIsNfcUserRestricted + ".");
                         mIsNfcUserRestricted = !mIsNfcUserRestricted;
-                        mIsNfcUserChangeRestricted = isNfcUserChangeRestricted();
                         if (shouldEnableNfc()) {
                             new EnableDisableTask().execute(TASK_ENABLE);
                         } else {
@@ -5686,18 +5685,6 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
             pw.flush();
             mDeviceHost.dump(pw,fd);
         }
-    }
-
-    /**
-     * Add NDEF NFCEE into routing table
-     */
-    public void addT4tNfceeAid() {
-        if (!mDeviceHost.isNdefNfceeEmulationSupported()) return;
-        Log.i(TAG, "Add T4T Nfcee AID");
-        int ndefNfceeRouteId = mDeviceHost.getNdefNfceeRouteId();
-        routeAids(DEFAULT_T4T_NFCEE_AID, ndefNfceeRouteId,
-                mAidMatchingExactOnly,
-                getT4tNfceePowerState());
     }
 
     /**
