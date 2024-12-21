@@ -145,65 +145,8 @@ public class AidRoutingManager {
     }
 
     private void clearNfcRoutingTableLocked() {
-        for (Map.Entry<String, Integer> aidEntry : mRouteForAid.entrySet())  {
-            String aid = aidEntry.getKey();
-            if (aid.endsWith("*")) {
-                if (mAidMatchingSupport == AID_MATCHING_EXACT_ONLY) {
-                    Log.e(TAG, "Device does not support prefix AIDs but AID [" + aid
-                            + "] is registered");
-                } else if (mAidMatchingSupport == AID_MATCHING_PREFIX_ONLY) {
-                    if (DBG) Log.d(TAG, "Unrouting prefix AID " + aid);
-                    // Cut off '*' since controller anyway treats all AIDs as a prefix
-                    aid = aid.substring(0, aid.length() - 1);
-                } else if (mAidMatchingSupport == AID_MATCHING_EXACT_OR_PREFIX ||
-                    mAidMatchingSupport == AID_MATCHING_EXACT_OR_SUBSET_OR_PREFIX) {
-                    aid = aid.substring(0, aid.length() - 1);
-                    if (DBG) Log.d(TAG, "Unrouting prefix AID " + aid);
-                }
-            }  else if (aid.endsWith("#")) {
-                if (mAidMatchingSupport == AID_MATCHING_EXACT_ONLY) {
-                    Log.e(TAG, "Device does not support subset AIDs but AID [" + aid
-                            + "] is registered");
-                } else if (mAidMatchingSupport == AID_MATCHING_PREFIX_ONLY ||
-                    mAidMatchingSupport == AID_MATCHING_EXACT_OR_PREFIX) {
-                    Log.e(TAG, "Device does not support subset AIDs but AID [" + aid
-                            + "] is registered");
-                } else if (mAidMatchingSupport == AID_MATCHING_EXACT_OR_SUBSET_OR_PREFIX) {
-                    if (DBG) Log.d(TAG, "Unrouting subset AID " + aid);
-                    aid = aid.substring(0, aid.length() - 1);
-                }
-            } else {
-                if (DBG) Log.d(TAG, "Unrouting exact AID " + aid);
-            }
-
-            NfcService.getInstance().unrouteAids(aid);
-        }
-        if (NfcService.getInstance().getNciVersion() >= NfcService.getInstance().NCI_VERSION_2_0) {
-            // unRoute EmptyAid
-            NfcService.getInstance().unrouteAids("");
-        }
-    }
-
-    private int getRouteForSecureElement(String se) {
-        if (se == null || se.length() <= 3) {
-            return 0;
-        }
-        try {
-            if (se.startsWith("eSE") && mOffHostRouteEse != null) {
-                int index = Integer.parseInt(se.substring(3));
-                if (mOffHostRouteEse.length >= index && index > 0) {
-                    return mOffHostRouteEse[index - 1] & 0xFF;
-                }
-            } else if (se.startsWith("SIM") && mOffHostRouteUicc != null) {
-                int index = Integer.parseInt(se.substring(3));
-                if (mOffHostRouteUicc.length >= index && index > 0) {
-                    return mOffHostRouteUicc[index - 1] & 0xFF;
-                }
-            }
-            if (mOffHostRouteEse == null && mOffHostRouteUicc == null)
-              return mDefaultOffHostRoute;
-        } catch (NumberFormatException e) { }
-        return 0;
+        if (DBG) Log.d(TAG, "clearNfcRoutingTableLocked()");
+        NfcService.getInstance().clearRoutingTable(0x01);
     }
 
     //Checking in case of power/route update of any AID after conflict
@@ -252,6 +195,13 @@ public class AidRoutingManager {
         return false;
     }
 
+    private boolean checkRoutingOptionChanged(int prevDefaultRoute, int prevDefaultIsoDepRoute,
+                                              int prevDefaultOffHostRoute) {
+        return (prevDefaultRoute != mDefaultRoute)
+                || (prevDefaultIsoDepRoute != mDefaultIsoDepRoute)
+                || (prevDefaultOffHostRoute != mDefaultOffHostRoute);
+    }
+
     private void checkOffHostRouteToHost(HashMap<String, AidEntry> routeCache) {
         Iterator<Map.Entry<String, AidEntry> > it = routeCache.entrySet().iterator();
         while (it.hasNext()) {
@@ -263,7 +213,8 @@ public class AidRoutingManager {
                 continue;
             }
             boolean mustHostRoute = aidEntry.unCheckedOffHostSE.stream()
-                    .anyMatch(offHost -> getRouteForSecureElement(offHost) == mDefaultRoute);
+                    .anyMatch(offHost ->mRoutingOptionManager.getRouteForSecureElement(offHost)
+                            == mDefaultRoute);
             if (mustHostRoute) {
                 if (DBG) Log.d(TAG, aid + " is route to host due to unchecked off host and " +
                         "default route(0x" + Integer.toHexString(mDefaultRoute) + ") is same");
@@ -303,6 +254,8 @@ public class AidRoutingManager {
         ArrayList<Integer> seList = new ArrayList<Integer>();
 
         int prevDefaultRoute = mDefaultRoute;
+        int prevDefaultIsoDepRoute = mDefaultIsoDepRoute;
+        int prevDefaultOffHostRoute = mDefaultOffHostRoute;
 
         if (mRoutingOptionManager.isRoutingTableOverrided()) {
             mDefaultRoute = mRoutingOptionManager.getOverrideDefaultRoute();
@@ -336,7 +289,7 @@ public class AidRoutingManager {
                 if (offHostSE == null) {
                     route = mDefaultOffHostRoute;
                 } else {
-                    route = getRouteForSecureElement(offHostSE);
+                    route = mRoutingOptionManager.getRouteForSecureElement(offHostSE);
                     if (route == 0) {
                         Log.e(TAG, "Invalid Off host Aid Entry " + offHostSE);
                         continue;
@@ -372,7 +325,6 @@ public class AidRoutingManager {
             }
 
             // Otherwise, update internal structures and commit new routing
-            clearNfcRoutingTableLocked();
             prevRouteForAid = mRouteForAid;
             mRouteForAid = routeForAid;
             prevPowerForAid = mPowerForAid;
@@ -541,11 +493,13 @@ public class AidRoutingManager {
 
             boolean mIsUnrouteRequired = checkUnrouteAid(prevRouteForAid, prevPowerForAid);
             boolean isRouteTableUpdated = checkRouteAid(prevRouteForAid, prevPowerForAid);
-            boolean isRoutingOptionUpdated = (prevDefaultRoute != mDefaultRoute);
+            boolean isRoutingOptionUpdated = checkRoutingOptionChanged(prevDefaultRoute,
+                    prevDefaultIsoDepRoute, prevDefaultOffHostRoute);
 
             if (isPowerStateUpdated || isRouteTableUpdated || mIsUnrouteRequired
                     || isRoutingOptionUpdated || force) {
                 if (aidRouteResolved) {
+                    clearNfcRoutingTableLocked();
                     sendRoutingTable(isRoutingOptionUpdated, force);
                     int result = commit(aidRoutingTableCache, isOverrideOrRecover);
                     if (result != NfcOemExtension.COMMIT_ROUTING_STATUS_OK) {
@@ -568,9 +522,7 @@ public class AidRoutingManager {
     }
 
     private int commit(HashMap<String, AidEntry> routeCache, boolean isOverrideOrRecover) {
-
         if(routeCache != null) {
-
             for (Map.Entry<String, AidEntry> aidEntry : routeCache.entrySet())  {
                 int route = aidEntry.getValue().route;
                 int aidType = aidEntry.getValue().aidInfo;
@@ -580,7 +532,6 @@ public class AidRoutingManager {
                     Log.d(TAG, "commit aid:" + aid + ",route:" + route
                         + ",aidtype:" + aidType + ", power state:" + power);
                 }
-
                 NfcService.getInstance().routeAids(aid, route, aidType, power);
             }
         }
@@ -590,19 +541,9 @@ public class AidRoutingManager {
     }
 
     private void sendRoutingTable(boolean optionChanged, boolean force) {
-        Log.d(TAG, "sendRoutingTable");
         if (!mRoutingOptionManager.isRoutingTableOverrided()) {
-            if (mDefaultRoute != ROUTE_HOST) {
-                Log.d(TAG, "Protocol and Technology entries need to sync with"
-                    + " mDefaultRoute: " + mDefaultRoute);
-                mDefaultIsoDepRoute = mDefaultRoute;
-                mDefaultOffHostRoute = mDefaultRoute;
-                mDefaultFelicaRoute = mDefaultRoute;
-            } else {
-                Log.d(TAG, "Default route is DeviceHost, use previous protocol, technology");
-            }
-
             if (force || optionChanged) {
+                Log.d(TAG, "sendRoutingTable");
                 NfcService.getInstance().setIsoDepProtocolRoute(mDefaultIsoDepRoute);
                 NfcService.getInstance().setTechnologyABFRoute(mDefaultOffHostRoute,
                         mDefaultFelicaRoute);
@@ -611,7 +552,6 @@ public class AidRoutingManager {
             Log.d(TAG, "Routing table is override, Do not send the protocol, tech");
         }
     }
-
 
     /**
      * This notifies that the AID routing table in the controller

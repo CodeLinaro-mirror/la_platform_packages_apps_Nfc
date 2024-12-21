@@ -235,7 +235,7 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
     static final int MSG_WATCHDOG_PING = 24;
     static final int MSG_SE_SELECTED_EVENT = 25;
     static final int MSG_UPDATE_SYSTEM_CODE_ROUTE = 26;
-
+    static final int MSG_PREFERRED_SIM_CHANGED = 27;
     static final String MSG_ROUTE_AID_PARAM_TAG = "power";
 
     // Negative value for NO polling delay
@@ -651,7 +651,7 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
         mNfcInjector.ensureWatchdogMonitoring();
         try {
             if (mNfcOemExtensionCallback != null) {
-                mNfcOemExtensionCallback.onRfFieldActivated(mRfFieldActivated);
+                mNfcOemExtensionCallback.onRfFieldDetected(mRfFieldActivated);
             }
         } catch (RemoteException e) {
             Log.e(TAG, "Failed to send onRemoteFieldActivated", e);
@@ -683,7 +683,7 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
         mRfFieldActivated = false;
         try {
             if (mNfcOemExtensionCallback != null) {
-                mNfcOemExtensionCallback.onRfFieldActivated(mRfFieldActivated);
+                mNfcOemExtensionCallback.onRfFieldDetected(mRfFieldActivated);
             }
         } catch (RemoteException e) {
             Log.e(TAG, "Failed to send onRemoteFieldDeactivated", e);
@@ -1438,37 +1438,35 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
     }
 
     void initSoundPoolIfNeededAndPlaySound(Runnable playSoundRunnable) {
-        synchronized (this) {
-            if (mSoundPool == null) {
-                // For the first sound play which triggers the sound pool initialization, play the
-                // sound after sound pool load is complete.
-                OnLoadCompleteListener onLoadCompleteListener = new OnLoadCompleteListener() {
-                    private int mNumLoadComplete = 0;
-                    @Override
-                    public void onLoadComplete(SoundPool soundPool, int sampleId, int status) {
-                        // Check that both end/error sounds are loaded before playing the sound.
-                        if (++mNumLoadComplete == 2) {
-                            Log.d(TAG, "Sound pool onLoadComplete: playing sound");
-                            playSoundRunnable.run();
-                        }
+        if (mSoundPool == null) {
+            // For the first sound play which triggers the sound pool initialization, play the
+            // sound after sound pool load is complete.
+            OnLoadCompleteListener onLoadCompleteListener = new OnLoadCompleteListener() {
+                private int mNumLoadComplete = 0;
+                @Override
+                public void onLoadComplete(SoundPool soundPool, int sampleId, int status) {
+                    // Check that both end/error sounds are loaded before playing the sound.
+                    if (++mNumLoadComplete == 2) {
+                        Log.d(TAG, "Sound pool onLoadComplete: playing sound");
+                        playSoundRunnable.run();
                     }
-                };
-                mSoundPool = new SoundPool.Builder()
-                        .setMaxStreams(1)
-                        .setAudioAttributes(
-                                new AudioAttributes.Builder()
-                                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
-                                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                                        .build())
-                        .build();
-                mSoundPool.setOnLoadCompleteListener(onLoadCompleteListener);
-                mEndSound = mSoundPool.load(mContext, R.raw.end, 1);
-                mErrorSound = mSoundPool.load(mContext, R.raw.error, 1);
-            } else {
-                // sound pool already loaded, play the sound.
-                Log.d(TAG, "Sound pool is already loaded, playing sound");
-                playSoundRunnable.run();
-            }
+                }
+            };
+            mSoundPool = new SoundPool.Builder()
+                    .setMaxStreams(1)
+                    .setAudioAttributes(
+                            new AudioAttributes.Builder()
+                                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                    .build())
+                    .build();
+            mSoundPool.setOnLoadCompleteListener(onLoadCompleteListener);
+            mEndSound = mSoundPool.load(mContext, R.raw.end, 1);
+            mErrorSound = mSoundPool.load(mContext, R.raw.error, 1);
+        } else {
+            // sound pool already loaded, play the sound.
+            Log.d(TAG, "Sound pool is already loaded, playing sound");
+            playSoundRunnable.run();
         }
     }
 
@@ -1711,6 +1709,8 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
 
             WatchDogThread watchDog = new WatchDogThread("enableInternal", INIT_WATCHDOG_MS);
             watchDog.start();
+
+            mCardEmulationManager.updateForDefaultSwpToEuicc();
             try {
                 mRoutingWakeLock.acquire();
                 try {
@@ -3230,7 +3230,7 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
         }
 
         @Override
-        public synchronized int sendVendorNciMessage(int mt, int gid, int oid, byte[] payload)
+        public int sendVendorNciMessage(int mt, int gid, int oid, byte[] payload)
                 throws RemoteException {
             NfcPermissions.enforceAdminPermissions(mContext);
             if ((!isNfcEnabled() && !mIsPowerSavingModeEnabled) && !isControllerAlwaysOn()) {
@@ -3239,7 +3239,7 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
             }
 
             FutureTask<Integer> sendVendorCmdTask = new FutureTask<>(
-                () -> {
+                () -> { synchronized (NfcService.this) {
                         if (isPowerSavingModeCmd(gid, oid, payload)) {
                             boolean status = setPowerSavingMode(payload[1] == 0x01);
                             return status ? NCI_STATUS_OK : NCI_STATUS_FAILED;
@@ -3264,7 +3264,7 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
                             }
                             return Integer.valueOf(response.status);
                         }
-                });
+                }});
             int status = NCI_STATUS_FAILED;
             try {
                 status = runTaskOnSingleThreadExecutor(sendVendorCmdTask,
@@ -3280,21 +3280,25 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
         }
 
         @Override
-        public synchronized void registerVendorExtensionCallback(INfcVendorNciCallback callbacks)
+        public void registerVendorExtensionCallback(INfcVendorNciCallback callbacks)
                 throws RemoteException {
-            if (DBG) Log.i(TAG, "Register the callback");
-            NfcPermissions.enforceAdminPermissions(mContext);
-            mNfcVendorNciCallBack = callbacks;
-            mDeviceHost.enableVendorNciNotifications(true);
+            synchronized (NfcService.this) {
+                if (DBG) Log.i(TAG, "Register the callback");
+                NfcPermissions.enforceAdminPermissions(mContext);
+                mNfcVendorNciCallBack = callbacks;
+                mDeviceHost.enableVendorNciNotifications(true);
+            }
         }
 
         @Override
-        public synchronized void unregisterVendorExtensionCallback(INfcVendorNciCallback callbacks)
+        public void unregisterVendorExtensionCallback(INfcVendorNciCallback callbacks)
                 throws RemoteException {
-            if (DBG) Log.i(TAG, "Unregister the callback");
-            NfcPermissions.enforceAdminPermissions(mContext);
-            mNfcVendorNciCallBack = null;
-            mDeviceHost.enableVendorNciNotifications(false);
+            synchronized (NfcService.this) {
+                if (DBG) Log.i(TAG, "Unregister the callback");
+                NfcPermissions.enforceAdminPermissions(mContext);
+                mNfcVendorNciCallBack = null;
+                mDeviceHost.enableVendorNciNotifications(false);
+            }
         }
 
         @Override
@@ -3434,7 +3438,7 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
                 try {
                     if (DBG) Log.i(TAG, "updateNfCState");
                     mNfcOemExtensionCallback.onCardEmulationActivated(mCardEmulationActivated);
-                    mNfcOemExtensionCallback.onRfFieldActivated(mRfFieldActivated);
+                    mNfcOemExtensionCallback.onRfFieldDetected(mRfFieldActivated);
                     mNfcOemExtensionCallback.onRfDiscoveryStarted(mRfDiscoveryStarted);
                     mNfcOemExtensionCallback.onEeListenActivated(mEeListenActivated);
                 } catch (RemoteException e) {
@@ -4534,7 +4538,16 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
         sendMessage(MSG_PREFERRED_PAYMENT_CHANGED, reason);
     }
 
+    public void onPreferredSimChanged() {
+        mHandler.sendEmptyMessage(MSG_PREFERRED_SIM_CHANGED);
+    }
+
     public void clearRoutingTable(int clearFlags) {
+        //Remove any previously sent messages not yet processed
+        mHandler.removeMessages(MSG_COMMIT_ROUTING);
+        mHandler.removeMessages(MSG_ROUTE_AID);
+        mHandler.removeMessages(MSG_CLEAR_ROUTING_TABLE);
+        mHandler.removeMessages(MSG_UNROUTE_AID);
         sendMessage(MSG_CLEAR_ROUTING_TABLE, clearFlags);
     }
 
@@ -4941,17 +4954,23 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
                     if (!isNfcEnabled()) break;
                     if (DBG) Log.d(TAG, "Clear routing table");
                     int clearFlags = (Integer)msg.obj;
-                    mDeviceHost.clearRoutingEntry(clearFlags);
+                    if (isNfcEnabled()) {
+                        mDeviceHost.clearRoutingEntry(clearFlags);
+                    }
                     break;
                 case MSG_UPDATE_ISODEP_PROTOCOL_ROUTE:
                     if (DBG) Log.d(TAG, "Update IsoDep Protocol Route");
-                    mDeviceHost.setIsoDepProtocolRoute((Integer)msg.obj);
+                    if (isNfcEnabled()) {
+                        mDeviceHost.setIsoDepProtocolRoute((Integer) msg.obj);
+                    }
                     break;
                 case MSG_UPDATE_TECHNOLOGY_ABF_ROUTE:
                     if (DBG) Log.d(TAG, "Update technology A,B&F route");
                     int msgRoute = msg.arg1;
                     int felicaRoute = msg.arg2;
-                    mDeviceHost.setTechnologyABFRoute(msgRoute, felicaRoute);
+                    if (isNfcEnabled()) {
+                        mDeviceHost.setTechnologyABFRoute(msgRoute, felicaRoute);
+                    }
                     break;
                 case MSG_WATCHDOG_PING:
                     NfcWatchdog watchdog = (NfcWatchdog) msg.obj;
@@ -4964,6 +4983,13 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
                 case MSG_UPDATE_SYSTEM_CODE_ROUTE:
                     if (DBG) Log.d(TAG, "Update system code");
                     mDeviceHost.setSystemCodeRoute((Integer) msg.obj);
+                    break;
+
+                case MSG_PREFERRED_SIM_CHANGED:
+                    if (!isNfcEnabled()) break;
+                    if (DBG) Log.d(TAG, "Preferred sim changed");
+                    new EnableDisableTask().execute(TASK_DISABLE);
+                    new EnableDisableTask().execute(TASK_ENABLE);
                     break;
                 default:
                     Log.e(TAG, "Unknown message received");
