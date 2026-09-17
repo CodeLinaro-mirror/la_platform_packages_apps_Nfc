@@ -69,6 +69,7 @@ import android.nfc.cardemulation.CardEmulation;
 import android.nfc.tech.Ndef;
 import android.nfc.tech.TagTechnology;
 import android.os.AsyncTask;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerExecutor;
@@ -154,7 +155,7 @@ public final class NfcServiceTest {
     private ContentObserver mContentObserver;
 
     @Before
-    public void setUp() {
+    public void setUp() throws PackageManager.NameNotFoundException {
         mLooper = new TestLooper();
         mStaticMockSession = ExtendedMockito.mockitoSession()
                 .mockStatic(NfcProperties.class)
@@ -192,6 +193,7 @@ public final class NfcServiceTest {
         when(mPreferences.edit()).thenReturn(mPreferencesEditor);
         when(mPowerManager.newWakeLock(anyInt(), anyString()))
                 .thenReturn(mock(PowerManager.WakeLock.class));
+        when(mPackageManager.getPackageUid(PKG_NAME, 0)).thenReturn(Binder.getCallingUid());
         when(mResources.getIntArray(R.array.antenna_x)).thenReturn(new int[0]);
         when(mResources.getIntArray(R.array.antenna_y)).thenReturn(new int[0]);
         when(NfcProperties.info_antpos_X()).thenReturn(List.of());
@@ -305,7 +307,7 @@ public final class NfcServiceTest {
     public void testSetObserveMode_nfcDisabled() throws Exception {
         mNfcService.mNfcAdapter.disable(true, PKG_NAME);
 
-        Assert.assertFalse(mNfcService.mNfcAdapter.setObserveMode(true, null));
+        Assert.assertFalse(mNfcService.mNfcAdapter.setObserveMode(true, PKG_NAME));
     }
 
     @Test
